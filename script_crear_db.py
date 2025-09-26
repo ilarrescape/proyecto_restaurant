@@ -8,6 +8,8 @@ Created on Wed Nov 13 04:11:40 2024
 
 import sqlite3
 
+import auth
+
 # Conectar y crear el archivo de base de datos
 conn = sqlite3.connect('recetas.db')
 cursor = conn.cursor()
@@ -55,6 +57,9 @@ cursor.execute('''
         FOREIGN KEY (id_subelaboracion) REFERENCES receta(id_receta)
     )
 ''')
+
+# Crear la tabla de usuarios segura
+auth.initialize_user_table()
 
 # Guardar los cambios
 conn.commit()
