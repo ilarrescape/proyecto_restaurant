@@ -53,8 +53,9 @@ def login() -> None:
                     iniciar = st.form_submit_button('Iniciar Sesión')
 
                 if iniciar:
-                    if auth.verify_user(usuario, contraseña):
-                        st.session_state[AUTH_SESSION_KEY] = usuario
+                    usuario_validado = auth.verify_user(usuario, contraseña)
+                    if usuario_validado:
+                        st.session_state[AUTH_SESSION_KEY] = usuario_validado
                         st.success('Autenticación exitosa. Redirigiendo...')
                         time.sleep(1)
                         st.rerun()

@@ -12,7 +12,10 @@ import hashlib
 import hmac
 from typing import Iterable, Tuple
 
+from cryptography.fernet import Fernet, InvalidToken
+
 _DB_PATH = Path(__file__).resolve().parent / "recetas.db"
+_KEY_PATH = Path(__file__).resolve().parent / "auth_key.key"
 _PBKDF2_ITERATIONS = 200_000
 _SALT_BYTES = 16
 
@@ -20,6 +23,49 @@ _SALT_BYTES = 16
 def _get_connection() -> sqlite3.Connection:
     """Return a SQLite connection to the project database."""
     return sqlite3.connect(_DB_PATH)
+
+
+def _load_or_create_key() -> bytes:
+    """Return a Fernet key, creating it if necessary."""
+    if _KEY_PATH.exists():
+        return _KEY_PATH.read_bytes()
+
+    key = Fernet.generate_key()
+    _KEY_PATH.write_bytes(key)
+    try:
+        os.chmod(_KEY_PATH, 0o600)
+    except OSError:
+        # Best-effort permissions hardening; ignore on unsupported platforms.
+        pass
+    return key
+
+
+def _get_cipher() -> Fernet:
+    """Instantiate and return the Fernet cipher used for usernames."""
+    return Fernet(_load_or_create_key())
+
+
+def _hash_username(username: str) -> str:
+    """Derive a deterministic hash for username lookups."""
+    if not isinstance(username, str) or not username:
+        raise ValueError("El nombre de usuario debe ser una cadena no vacía.")
+    return hashlib.sha256(username.encode("utf-8")).hexdigest()
+
+
+def _encrypt_username(username: str) -> str:
+    """Encrypt the provided username for storage."""
+    cipher = _get_cipher()
+    token = cipher.encrypt(username.encode("utf-8"))
+    return token.decode("utf-8")
+
+
+def _decrypt_username(token: str) -> str:
+    """Decrypt an encrypted username token."""
+    cipher = _get_cipher()
+    try:
+        return cipher.decrypt(token.encode("utf-8")).decode("utf-8")
+    except InvalidToken:  # pragma: no cover - defensive branch
+        return ""
 
 
 @contextmanager
@@ -42,13 +88,72 @@ def initialize_user_table() -> None:
             """
             CREATE TABLE IF NOT EXISTS usuario (
                 id_usuario INTEGER PRIMARY KEY AUTOINCREMENT,
-                nombre_usuario TEXT UNIQUE NOT NULL,
+                nombre_usuario_hash TEXT UNIQUE NOT NULL,
+                nombre_usuario_cifrado TEXT NOT NULL,
                 hash_contrasena TEXT NOT NULL,
                 sal_contrasena TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+
+    _ensure_user_table_schema()
+
+
+def _ensure_user_table_schema() -> None:
+    """Upgrade legacy schemas to include hashed and encrypted usernames."""
+    with db_cursor() as cursor:
+        cursor.execute("PRAGMA table_info(usuario)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if not columns:
+            return
+
+        if {"nombre_usuario_hash", "nombre_usuario_cifrado"}.issubset(columns):
+            return
+
+        if "nombre_usuario" not in columns:
+            raise RuntimeError(
+                "Esquema de tabla 'usuario' inesperado; se requiere intervención manual."
+            )
+
+        cipher = _get_cipher()
+
+        cursor.execute("ALTER TABLE usuario RENAME TO usuario_legacy")
+        cursor.execute(
+            """
+            CREATE TABLE usuario (
+                id_usuario INTEGER PRIMARY KEY AUTOINCREMENT,
+                nombre_usuario_hash TEXT UNIQUE NOT NULL,
+                nombre_usuario_cifrado TEXT NOT NULL,
+                hash_contrasena TEXT NOT NULL,
+                sal_contrasena TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        cursor.execute(
+            "SELECT id_usuario, nombre_usuario, hash_contrasena, sal_contrasena, created_at FROM usuario_legacy"
+        )
+        rows = cursor.fetchall()
+        for user_id, username, hash_pw, salt, created_at in rows:
+            username_hash = hashlib.sha256(username.encode("utf-8")).hexdigest()
+            encrypted_username = cipher.encrypt(username.encode("utf-8")).decode("utf-8")
+            cursor.execute(
+                """
+                INSERT INTO usuario (
+                    id_usuario,
+                    nombre_usuario_hash,
+                    nombre_usuario_cifrado,
+                    hash_contrasena,
+                    sal_contrasena,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (user_id, username_hash, encrypted_username, hash_pw, salt, created_at),
+            )
+
+        cursor.execute("DROP TABLE usuario_legacy")
 
 
 def _hash_password(password: str, salt: bytes | None = None) -> Tuple[str, str]:
@@ -68,48 +173,69 @@ def _hash_password(password: str, salt: bytes | None = None) -> Tuple[str, str]:
 
 def create_user(username: str, password: str, *, overwrite: bool = False) -> None:
     """Create a new user with a securely hashed password."""
-    if not isinstance(username, str) or not username:
-        raise ValueError("El nombre de usuario debe ser una cadena no vacía.")
-
     initialize_user_table()
+    username_hash = _hash_username(username)
+    encrypted_username = _encrypt_username(username)
     salt_b64, hash_b64 = _hash_password(password)
 
     with db_cursor() as cursor:
         cursor.execute(
-            "SELECT id_usuario FROM usuario WHERE nombre_usuario = ?",
-            (username,),
+            "SELECT id_usuario FROM usuario WHERE nombre_usuario_hash = ?",
+            (username_hash,),
         )
         existing = cursor.fetchone()
         if existing and not overwrite:
             raise ValueError("El usuario ya existe. Use --overwrite para reemplazarlo.")
         if existing and overwrite:
             cursor.execute(
-                "UPDATE usuario SET hash_contrasena = ?, sal_contrasena = ? WHERE nombre_usuario = ?",
-                (hash_b64, salt_b64, username),
+                """
+                UPDATE usuario
+                   SET hash_contrasena = ?,
+                       sal_contrasena = ?,
+                       nombre_usuario_cifrado = ?
+                 WHERE nombre_usuario_hash = ?
+                """,
+                (hash_b64, salt_b64, encrypted_username, username_hash),
             )
         else:
             cursor.execute(
-                "INSERT INTO usuario (nombre_usuario, hash_contrasena, sal_contrasena) VALUES (?, ?, ?)",
-                (username, hash_b64, salt_b64),
+                """
+                INSERT INTO usuario (
+                    nombre_usuario_hash,
+                    nombre_usuario_cifrado,
+                    hash_contrasena,
+                    sal_contrasena
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (username_hash, encrypted_username, hash_b64, salt_b64),
             )
 
 
-def verify_user(username: str, password: str) -> bool:
-    """Return True if the provided credentials match a stored user."""
+def verify_user(username: str, password: str) -> str | None:
+    """Return the stored username when the credentials are valid."""
     initialize_user_table()
+    username_hash = _hash_username(username)
     with db_cursor() as cursor:
         cursor.execute(
-            "SELECT hash_contrasena, sal_contrasena FROM usuario WHERE nombre_usuario = ?",
-            (username,),
+            """
+            SELECT hash_contrasena, sal_contrasena, nombre_usuario_cifrado
+              FROM usuario
+             WHERE nombre_usuario_hash = ?
+            """,
+            (username_hash,),
         )
         row = cursor.fetchone()
     if row is None:
-        return False
+        return None
 
-    stored_hash_b64, salt_b64 = row
+    stored_hash_b64, salt_b64, encrypted_username = row
     salt = base64.b64decode(salt_b64.encode("utf-8"))
     _, computed_hash_b64 = _hash_password(password, salt=salt)
-    return hmac.compare_digest(stored_hash_b64, computed_hash_b64)
+    if not hmac.compare_digest(stored_hash_b64, computed_hash_b64):
+        return None
+
+    decrypted = _decrypt_username(encrypted_username)
+    return decrypted or username
 
 
 def _parse_args(argv: Iterable[str]) -> argparse.Namespace:
