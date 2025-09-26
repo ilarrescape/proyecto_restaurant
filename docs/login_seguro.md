@@ -5,6 +5,7 @@ Este documento describe la implementación del nuevo sistema de autenticación s
 ## 1. Resumen de la solución
 
 - Las credenciales ya no están codificadas en el código fuente.
+- Los nombres de usuario se almacenan cifrados con `Fernet` y se indexan mediante un hash SHA-256 para evitar duplicados.
 - Las contraseñas se almacenan utilizando PBKDF2-HMAC con SHA-256, 200 000 iteraciones y una sal aleatoria por usuario.
 - Las comprobaciones de acceso se realizan contra la tabla `usuario` en la base de datos `recetas.db`.
 - El módulo `auth.py` ofrece utilidades reutilizables para crear cuentas y validar credenciales.
@@ -42,13 +43,13 @@ Este documento describe la implementación del nuevo sistema de autenticación s
 
 - Al abrir la aplicación, se muestra un formulario de inicio de sesión protegido (`app_restaurante.py`).
 - En cualquier momento se puede alternar al formulario de registro para crear una cuenta nueva sin abandonar la pantalla.
-- Tras enviar las credenciales, se verifica el hash almacenado mediante `auth.verify_user`.
-- Si la verificación es exitosa, se almacena únicamente el nombre de usuario en la sesión (`st.session_state['auth_user']`).
+- Tras enviar las credenciales, se verifica el hash almacenado mediante `auth.verify_user`, que devuelve el nombre de usuario descifrado cuando las credenciales son válidas.
+- Si la verificación es exitosa, se almacena en la sesión (`st.session_state['auth_user']`) el nombre de usuario recuperado de forma segura.
 - Desde la barra lateral es posible cerrar la sesión de forma segura.
 
 ## 4. Inicialización de la base de datos
 
-El script `script_crear_db.py` sigue siendo responsable de crear las tablas principales de recetas y ahora también garantiza que la tabla `usuario` exista mediante `auth.initialize_user_table()`. Puedes ejecutar el script tantas veces como sea necesario; las tablas se crean sólo si no existen.
+El script `script_crear_db.py` sigue siendo responsable de crear las tablas principales de recetas y ahora también garantiza que la tabla `usuario` exista mediante `auth.initialize_user_table()`. Si detecta un esquema antiguo, lo migra automáticamente cifrando los nombres de usuario existentes. Puedes ejecutar el script tantas veces como sea necesario; las tablas se crean o actualizan según corresponda.
 
 ## 5. Buenas prácticas adicionales
 
