@@ -15,7 +15,7 @@ import recetas
 import detalle_recetas_ingredientes
 import detalle_receta_subelaboracion
 
-from streamlit_lottie import st_lottie
+# from streamlit_lottie import st_lottie
 import requests
 
 def load_lottieurl(url):
