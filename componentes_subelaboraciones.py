@@ -13,6 +13,8 @@ import streamlit as st
 import pandas as pd
 import time
 
+MENSAJE_SIN_SUBELABORACIONES = "No existen subelaboraciones registradas. Puedes crear una desde 'Agregar Receta'."
+
 def eliminar_subelaboracion_temporal(seleccion):
     indice_auxiliar = seleccion['selection']['rows']
     st.session_state.seleccion_subelaboraciones.drop(indice_auxiliar, axis=0, inplace = True)
@@ -99,7 +101,11 @@ def editar_subelaboracion_temporal(seleccion,lista_subelaboracion):
 @st.dialog('Agregar Subelaboracion')
 def agregar_subelaboracion():
     lista_subelaboracion = recetas.consultar_subelaboracion()
-    
+
+    if not lista_subelaboracion:
+        st.info(MENSAJE_SIN_SUBELABORACIONES)
+        return
+
     dic_subelaboracion = {row['nombre_receta']:row['id_receta'] for row in lista_subelaboracion}
 
     select_subelaboracion = st.selectbox('Ingresar Subelaboracion', dic_subelaboracion)
@@ -199,13 +205,19 @@ def visualizar_subelaboraciones():
                 eliminar_subelaboracion_temporal(seleccion_subelaboracion)
         
         with _col_editar:
-            
+
             lista_subelaboracion = recetas.consultar_subelaboracion()
-            
-            if st.button('Subelaboracion',icon=':material/edit:', use_container_width=True):
+
+            if not lista_subelaboracion:
+                st.info(MENSAJE_SIN_SUBELABORACIONES)
+
+            if st.button('Subelaboracion',icon=':material/edit:', use_container_width=True, disabled=not lista_subelaboracion):
                 editar_subelaboracion_temporal(seleccion_subelaboracion, lista_subelaboracion)
     else:
         _col_relleno, _col_agregar = st.columns([8,2])
         with _col_agregar:
-            if st.button('__+__ Subelaboracion', use_container_width=True):
+            lista_subelaboracion = recetas.consultar_subelaboracion()
+            if not lista_subelaboracion:
+                st.info(MENSAJE_SIN_SUBELABORACIONES)
+            if st.button('__+__ Subelaboracion', use_container_width=True, disabled=not lista_subelaboracion):
                 agregar_subelaboracion()
